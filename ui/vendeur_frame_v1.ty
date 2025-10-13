@@ -1,0 +1,468 @@
+# Fichier: ui/vendeur_frame.py
+# Version 3.1 - Correction de l'affichage des produits et de la déduction de stock.
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import os
+from datetime import datetime
+from PIL import Image, ImageTk, ImageOps
+
+# Imports depuis notre structure refactorisée
+from config import FONDS_DE_CAISSE
+from database.db_manager import execute_query
+from ui.components.app_dialogs import (
+    AjouterDepenseWindow, DemandeClotureWindow, InvendusWindow, RapportClotureWindow, 
+    CustomMessageBox
+)
+
+
+class VendeurFrame(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg="#eaf0f6")
+        self.controller = controller
+        self.panier = []
+        self.produit_selectionne = None
+        self.nouvelle_saisie_calc = True
+        self.mode_affichage_milieu = 'panier'
+        self.images_produits = []
+        
+        self.main_controller = controller.controller if hasattr(controller, 'controller') else controller
+
+        self.columnconfigure(0, weight=1)
+        self.columnconfigure(1, weight=0)
+        self.columnconfigure(2, weight=0)
+        self.rowconfigure(1, weight=1)
+
+        self.creer_barre_superieure(0)
+        self.creer_colonne_produits(0)
+        self.creer_colonne_panier_et_historique(1)
+        self.creer_colonne_calculatrice(2)
+        
+        self.charger_categories()
+        if hasattr(self, 'liste_categories') and self.liste_categories:
+            self.charger_produits_par_categorie(self.liste_categories[0])
+        
+        self.bind("<Visibility>", self.on_show)
+
+    def charger_produits_par_categorie(self, categorie):
+        """
+        Charge les produits d'une catégorie.
+        CORRIGÉ: Affiche uniquement les produits de type 'vente'.
+        """
+        for widget in self.produit_frame.winfo_children(): widget.destroy()
+        self.images_produits.clear()
+        
+        query = """
+            SELECT p.nom, p.prix, p.photo_path 
+            FROM produits p 
+            JOIN categories c ON p.categorie_id = c.id 
+            WHERE c.nom = ? AND p.type = 'vente'
+            ORDER BY p.nom
+        """
+        produits = execute_query(query, (categorie,), fetch='all') or []
+        row, col = 0, 0
+        for nom, prix, photo_path in produits:
+            prix_int = int(prix)
+            card = tk.Frame(self.produit_frame, bg="#ecf0f1", bd=1, relief="solid")
+            card.grid(row=row, column=col, padx=10, pady=10)
+            photo_image = None
+            if photo_path and os.path.exists(photo_path):
+                try:
+                    img = Image.open(photo_path); img = ImageOps.exif_transpose(img); img.thumbnail((140, 120))
+                    photo_image = ImageTk.PhotoImage(img)
+                    self.images_produits.append(photo_image)
+                except Exception: photo_image = None
+            img_button = tk.Button(card, image=photo_image, bg="white", relief="flat", command=lambda n=nom, p=prix_int: self.selectionner_produit(n, p))
+            img_button.pack(padx=5, pady=5)
+            label_text = f"{nom}\n{prix_int} د.ج"
+            tk.Label(card, text=label_text, font=("Cairo", 14, "bold"), bg="#ecf0f1").pack(pady=(0, 5))
+            col += 1
+            if col == 5: col = 0; row += 1
+
+    def valider_vente(self):
+        """
+        Valide la vente en cours.
+        CORRIGÉ: Déduit la quantité du bon stock (soit le stock propre, soit le stock lié).
+        """
+        if not self.panier: messagebox.showinfo("معلومة", "السلة فارغة."); return
+        id_vendeur_actif = self.main_controller.user_id
+        if id_vendeur_actif is None: messagebox.showerror("Erreur Critique", "Aucun utilisateur n'est connecté."); return
+        
+        total_vente = sum(item['prix'] * item['qte'] for item in self.panier)
+        
+        vente_id = execute_query("INSERT INTO ventes (total, date_vente, vendeur_id) VALUES (?, datetime('now', 'localtime'), ?)", (total_vente, id_vendeur_actif))
+        
+        if vente_id:
+            for item in self.panier:
+                produit_info = execute_query("SELECT id, (SELECT ingredient_id FROM produit_composition WHERE produit_final_id = p.id) as 'id_ingredient' FROM produits p WHERE nom=?", (item['nom'],), fetch='one')
+                
+                if produit_info:
+                    produit_id, ingredient_id = produit_info
+                    
+                    execute_query("INSERT INTO details_vente (vente_id, produit_id, quantite, prix_unitaire) VALUES (?, ?, ?, ?)", 
+                                  (vente_id, produit_id, item['qte'], item['prix']))
+                    
+                    # Si le produit est composé d'un ingrédient, on déduit le stock de l'ingrédient.
+                    # Sinon, on déduit son propre stock.
+                    stock_to_update_id = ingredient_id if ingredient_id else produit_id
+                    execute_query("UPDATE produits SET stock = stock - ? WHERE id = ?", (item['qte'], stock_to_update_id))
+
+            messagebox.showinfo("نجاح", "✅ تم تسجيل البيع بنجاح!")
+            self.panier.clear(); self.mettre_a_jour_panier_visuel()
+            self.label_produit_selectionne.config(text="الرجاء اختيار منتج", font=("Cairo", 16, "italic"), fg="#7f8c8d")
+
+    def ouvrir_fenetre_depense(self):
+        """
+        Ouvre la fenêtre pour ajouter une dépense manuelle.
+        """
+        AjouterDepenseWindow(self, self.main_controller)
+
+    def cloturer_session(self):
+        """Lance le processus de clôture de session (service ou journée)."""
+        choix = DemandeClotureWindow(self).show()
+        if not choix:
+            return
+
+        if choix == 'journee':
+            invendus = InvendusWindow(self).show()
+            if invendus is None: # L'utilisateur a annulé
+                return
+            
+            id_admin = self.main_controller.user_id
+            for item in invendus:
+                description = f"خسارة غير مباعة: {item['qte']}x {item['nom']}"
+                execute_query("INSERT INTO transactions (description, montant, date, type_transaction, vendeur_id) VALUES (?, ?, datetime('now', 'localtime'), ?, ?)",
+                                      (description, -item['cout_perte'], 'Perte Invendus', id_admin))
+                execute_query("UPDATE produits SET stock = 0 WHERE id = ?", (item['id'],))
+            
+            if invendus:
+                messagebox.showinfo("نجاح", "تم تسجيل الخسائر وإعادة ضبط المخزون اليومي بنجاح.", parent=self)
+
+        self.afficher_rapport_final(choix)
+
+    def afficher_rapport_final(self, type_rapport):
+        """Calcule et affiche le rapport de clôture final."""
+        nom_vendeur_rapport = None
+        id_vendeur = self.main_controller.user_id
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        if type_rapport == 'service':
+            if id_vendeur is None:
+                messagebox.showerror("خطأ", "لا يمكن بدء الإغلاق لأنه لم يتم تحديد أي مستخدم.", parent=self)
+                return
+            titre_rapport = "تقرير نهاية الخدمة"
+            nom_vendeur_rapport = self.main_controller.nom_utilisateur
+            ventes_query = "SELECT SUM(total) FROM ventes WHERE vendeur_id = ? AND date(date_vente) = ?"
+            ventes_params = (id_vendeur, today)
+            depenses_query = "SELECT SUM(montant) FROM transactions WHERE vendeur_id = ? AND date(date) = ?"
+            depenses_params = (id_vendeur, today)
+        else: # 'journee'
+            titre_rapport = "التقرير النهائي لليوم"
+            ventes_query = "SELECT SUM(total) FROM ventes WHERE date(date_vente) = ?"
+            ventes_params = (today,)
+            depenses_query = "SELECT SUM(montant) FROM transactions WHERE date(date) = ?"
+            depenses_params = (today,)
+
+        result_ventes = execute_query(ventes_query, ventes_params, fetch='one')
+        result_depenses = execute_query(depenses_query, depenses_params, fetch='one')
+
+        total_ventes = result_ventes[0] if result_ventes and result_ventes[0] is not None else 0
+        total_depenses = result_depenses[0] if result_depenses and result_depenses[0] is not None else 0
+        solde_final = FONDS_DE_CAISSE + total_ventes + total_depenses
+        
+        report_data = {
+            "titre_rapport": titre_rapport, "nom_vendeur": nom_vendeur_rapport,
+            "date": today, "heure": datetime.now().strftime('%H:%M:%S'),
+            "fonds_de_caisse": FONDS_DE_CAISSE, "total_ventes": total_ventes,
+            "total_depenses": total_depenses, "solde_final": solde_final
+        }
+
+        RapportClotureWindow(self, report_data)
+        
+        if type_rapport == 'service':
+            self.panier.clear()
+            self.mettre_a_jour_panier_visuel()
+            self.main_controller.show_frame("LoginFrame")
+
+    def creer_barre_superieure(self, row_index):
+        top_bar = tk.Frame(self, bg="#34495e", height=60)
+        top_bar.grid(row=row_index, column=0, columnspan=3, sticky="ew")
+        top_bar.pack_propagate(False)
+
+        self.label_vendeur_actif = tk.Label(top_bar, text="Vendeur: ...", font=("Cairo", 18, "bold"), bg="#34495e", fg="white")
+        self.label_vendeur_actif.pack(side="right", padx=20)
+
+        btn_cloture = tk.Button(top_bar, text="🔒  تغيير المستخدم / غلق الصندوق", font=("Cairo", 14, "bold"), 
+                                 bg="#e67e22", fg="white", relief="flat", 
+                                 activebackground="#d35400", command=self.cloturer_session)
+        btn_cloture.pack(side="left", padx=20)
+
+    def on_show(self, event):
+        """Met à jour le nom de l'utilisateur lorsque le frame devient visible."""
+        nom_vendeur = self.main_controller.nom_utilisateur
+        if nom_vendeur:
+            self.label_vendeur_actif.config(text=f"👤  المستخدم: {nom_vendeur}")
+        else:
+            self.label_vendeur_actif.config(text="لم يتم تحديد المستخدم")
+
+    def creer_colonne_produits(self, col_index):
+        gauche_frame = tk.Frame(self, bg="#eaf0f6")
+        gauche_frame.grid(row=1, column=col_index, sticky="nsew", padx=(10, 5), pady=10)
+        gauche_frame.rowconfigure(1, weight=1)
+        gauche_frame.columnconfigure(0, weight=1)
+
+        self.categorie_frame = tk.Frame(gauche_frame, bg="#eaf0f6")
+        self.categorie_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        product_container = tk.Frame(gauche_frame, bg="#ffffff", bd=1, relief="solid")
+        product_container.grid(row=1, column=0, sticky="nsew")
+        product_container.rowconfigure(0, weight=1)
+        product_container.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(product_container, bg="#ffffff", highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(product_container, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.produit_frame = tk.Frame(canvas, bg="#ffffff")
+        self.frame_id = canvas.create_window((0, 0), window=self.produit_frame, anchor="nw")
+
+        canvas.bind("<Configure>", self.on_canvas_configure)
+        self.produit_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+    def on_canvas_configure(self, event):
+        canvas = event.widget
+        canvas.itemconfig(self.frame_id, width=canvas.winfo_width())
+
+    def creer_colonne_panier_et_historique(self, col_index):
+        milieu_frame = tk.Frame(self, bg="#ffffff", bd=1, relief="solid", width=450)
+        milieu_frame.grid(row=1, column=col_index, sticky="ns", pady=10, padx=0)
+        milieu_frame.grid_propagate(False)
+        milieu_frame.rowconfigure(1, weight=1)
+        milieu_frame.columnconfigure(0, weight=1)
+        
+        self.label_titre_milieu = tk.Label(milieu_frame, text="السلة الحالية", font=("Cairo", 24, "bold"), bg="white", fg="#2c3e50")
+        self.label_titre_milieu.grid(row=0, column=0, pady=10)
+        
+        tree_container = tk.Frame(milieu_frame, bg="white")
+        tree_container.grid(row=1, column=0, sticky="nsew")
+        tree_container.rowconfigure(0, weight=1)
+        tree_container.columnconfigure(0, weight=1)
+        
+        style = ttk.Style(self)
+        style.configure("Panier.Treeview", font=("Cairo", 14), rowheight=35)
+        style.configure("Panier.Treeview.Heading", font=("Cairo", 16, "bold"))
+        
+        self.panier_tree = ttk.Treeview(tree_container, columns=("total", "prix", "qte", "nom"), show="headings", style="Panier.Treeview")
+        self.panier_tree.heading("nom", text="المنتج", anchor="e"); self.panier_tree.column("nom", width=160, anchor="e")
+        self.panier_tree.heading("qte", text="الكمية", anchor="center"); self.panier_tree.column("qte", width=60, anchor="center")
+        self.panier_tree.heading("prix", text="السعر", anchor="e"); self.panier_tree.column("prix", width=80, anchor="e")
+        self.panier_tree.heading("total", text="المجموع", anchor="e"); self.panier_tree.column("total", width=100, anchor="e")
+        
+        self.historique_tree = ttk.Treeview(tree_container, columns=("details", "total", "heure"), show="headings", style="Panier.Treeview")
+        self.historique_tree.heading("heure", text="الوقت", anchor="e"); self.historique_tree.column("heure", width=100, anchor="e")
+        self.historique_tree.heading("total", text="الإجمالي", anchor="e"); self.historique_tree.column("total", width=100, anchor="e")
+        self.historique_tree.heading("details", text="المنتجات", anchor="e"); self.historique_tree.column("details", width=230, anchor="e")
+        
+        self.panier_btn_frame = tk.Frame(milieu_frame, bg="white")
+        self.panier_btn_frame.grid(row=2, column=0, pady=10)
+        
+        btn_panier_config = {'font': ("Cairo", 14, "bold"), 'pady': 8}
+        
+        self.btn_suppr_article = tk.Button(self.panier_btn_frame, text="🗑️ حذف المنتج", bg="#e74c3c", fg="white", command=self.supprimer_article_panier, **btn_panier_config)
+        self.btn_historique = tk.Button(self.panier_btn_frame, text="🧾 سجل اليوم", bg="#34495e", fg="white", command=self.basculer_vue_historique, **btn_panier_config)
+        self.btn_retour_panier = tk.Button(self.panier_btn_frame, text="➡️ العودة للسلة", bg="#34495e", fg="white", command=self.basculer_vue_panier, **btn_panier_config)
+        self.btn_suppr_vente = tk.Button(self.panier_btn_frame, text="🗑️ حذف البيع", bg="#c0392b", fg="white", command=self.supprimer_vente_historique, **btn_panier_config)
+        
+        self.basculer_vue_panier()
+
+    def creer_colonne_calculatrice(self, col_index):
+        droite_frame = tk.Frame(self, bg="#ffffff", width=420, bd=1, relief="solid")
+        droite_frame.grid(row=1, column=col_index, sticky="ns", pady=10, padx=(0, 10))
+        droite_frame.grid_propagate(False)
+        droite_frame.columnconfigure(0, weight=1)
+        droite_frame.rowconfigure(2, weight=1)
+        droite_frame.rowconfigure(3, weight=0)
+        
+        total_frame = tk.Frame(droite_frame, bg="#2c3e50")
+        total_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
+        self.total_var = tk.StringVar(value="0 د.ج")
+        
+        tk.Label(total_frame, text="الإجمالي:", font=("Cairo", 26, "bold"), fg="white", bg="#2c3e50").pack(side="right", padx=15, pady=10)
+        tk.Label(total_frame, textvariable=self.total_var, font=("Cairo", 26, "bold"), fg="white", bg="#2c3e50").pack(side="left", padx=15, pady=10)
+        
+        self.label_produit_selectionne = tk.Label(droite_frame, text="الرجاء اختيار منتج", font=("Cairo", 16, "italic"), bg="white", fg="#7f8c8d")
+        self.label_produit_selectionne.grid(row=1, column=0, pady=(10, 0))
+        
+        calc_frame = tk.Frame(droite_frame, bg="#ffffff")
+        calc_frame.grid(row=2, column=0, pady=5, padx=10, sticky="nsew")
+        calc_frame.columnconfigure((0, 1, 2), weight=1)
+        
+        self.entry_calc = tk.Entry(calc_frame, font=("Cairo", 28, "bold"), justify="center", relief="solid", bd=1)
+        self.entry_calc.grid(row=0, column=0, columnspan=3, pady=10, ipady=10, sticky="ew")
+        
+        boutons_calc = [("3", 1, 0), ("2", 1, 1), ("1", 1, 2), ("6", 2, 0), ("5", 2, 1), ("4", 2, 2), ("9", 3, 0), ("8", 3, 1), ("7", 3, 2), ("←", 4, 0), ("0", 4, 1), ("C", 4, 2)]
+        btn_calc_font = ("Cairo", 20, "bold")
+        
+        for text, r, c in boutons_calc:
+            btn = tk.Button(calc_frame, text=text, font=btn_calc_font, relief="raised", bd=1, bg="#ecf0f1", command=lambda t=text: self.gerer_calc(t))
+            btn.grid(row=r, column=c, padx=3, pady=3, sticky="nsew", ipady=15)
+            
+        tk.Button(calc_frame, text="✔ إضافة الكمية", font=("Cairo", 18, "bold"), bg="#3498db", fg="white", command=self.valider_quantite).grid(row=5, column=0, columnspan=3, pady=(10, 5), sticky="ew", ipady=10)
+        
+        btn_action_frame = tk.Frame(droite_frame, bg="#ffffff")
+        btn_action_frame.grid(row=3, column=0, pady=15, padx=10, sticky="s")
+        
+        btn_action_config = {'font': ("Cairo", 18, "bold"), 'fg': 'white', 'relief': 'raised', 'bd': 2, 'pady': 12}
+
+        tk.Button(btn_action_frame, text="✅ تسجيل البيع", bg="#27ae60", **btn_action_config, command=self.valider_vente).pack(fill="x", expand=True, pady=3)
+        tk.Button(btn_action_frame, text="💸 تسجيل مصروف", bg="#f39c12", **btn_action_config, command=self.ouvrir_fenetre_depense).pack(fill="x", expand=True, pady=3)
+        tk.Button(btn_action_frame, text="❌ إلغاء السلة", bg="#c0392b", **btn_action_config, command=self.annuler_vente).pack(fill="x", expand=True, pady=3)
+
+    def ouvrir_fenetre_depense(self):
+        AjouterDepenseWindow(self, self.main_controller)
+
+    def basculer_vue_historique(self):
+        self.mode_affichage_milieu = 'historique'
+        self.label_titre_milieu.config(text="سجل مبيعات اليوم")
+        self.panier_tree.grid_remove()
+        self.historique_tree.grid(row=0, column=0, sticky="nsew")
+        self.btn_suppr_article.pack_forget()
+        self.btn_historique.pack_forget()
+        self.btn_retour_panier.pack(side="right", padx=5)
+        is_admin_now = hasattr(self.main_controller, 'role') and self.main_controller.role == 'admin'
+        if is_admin_now:
+            self.btn_suppr_vente.pack(side="right", padx=5)
+        self.charger_historique()
+
+    def basculer_vue_panier(self):
+        self.mode_affichage_milieu = 'panier'
+        self.label_titre_milieu.config(text="السلة الحالية")
+        self.historique_tree.grid_remove()
+        self.panier_tree.grid(row=0, column=0, sticky="nsew")
+        self.btn_retour_panier.pack_forget()
+        self.btn_suppr_vente.pack_forget()
+        self.btn_suppr_article.pack(side="right", padx=5)
+        self.btn_historique.pack(side="right", padx=5)
+
+    def charger_historique(self):
+        for i in self.historique_tree.get_children(): self.historique_tree.delete(i)
+        today_date = datetime.now().strftime('%Y-%m-%d')
+        ventes = execute_query("SELECT id, time(date_vente), total FROM ventes WHERE date(date_vente) = ? ORDER BY date_vente DESC", (today_date,), fetch='all') or []
+        for vente_id, heure, total in ventes:
+            details_list = execute_query("SELECT p.nom, dv.quantite FROM details_vente dv JOIN produits p ON p.id = dv.produit_id WHERE dv.vente_id = ?", (vente_id,), fetch='all') or []
+            details_str = "، ".join([f"{qte}x {nom}" for nom, qte in details_list])
+            self.historique_tree.insert("", "end", iid=vente_id, values=(details_str, f"{int(total)} د.ج", heure.split('.')[0]))
+
+    def supprimer_vente_historique(self):
+        selected_item = self.historique_tree.selection()
+        if not selected_item: messagebox.showwarning("تنبيه", "الرجاء اختيار بيع من السجل لحذفه."); return
+        if not CustomMessageBox(self, "تأكيد الحذف", "هل أنت متأكد من حذف هذا البيع بشكل دائم؟").show(): return
+        vente_id = selected_item[0]
+        details_vente = execute_query("SELECT produit_id, quantite FROM details_vente WHERE vente_id = ?", (vente_id,), fetch='all') or []
+        for prod_id, qte in details_vente:
+            execute_query("UPDATE produits SET stock = stock + ? WHERE id = ?", (qte, prod_id))
+        execute_query("DELETE FROM ventes WHERE id = ?", (vente_id,))
+        self.charger_historique()
+
+    def gerer_calc(self, touche):
+        if self.nouvelle_saisie_calc and touche not in ["C", "←"]: self.entry_calc.delete(0, tk.END); self.nouvelle_saisie_calc = False
+        current_text = self.entry_calc.get()
+        if touche == "C": self.entry_calc.delete(0, tk.END)
+        elif touche == "←": self.entry_calc.delete(len(current_text) - 1, tk.END)
+        else: self.entry_calc.insert(tk.END, touche)
+
+    def valider_quantite(self):
+        if self.mode_affichage_milieu == 'historique': messagebox.showwarning("تنبيه", "الرجاء العودة إلى السلة لإضافة منتجات."); return
+        qte_str = self.entry_calc.get()
+        if not self.produit_selectionne: messagebox.showwarning("تنبيه", "الرجاء اختيار منتج."); return
+        if not qte_str.isdigit() or int(qte_str) <= 0: messagebox.showwarning("تنبيه", "الرجاء إدخال كمية صحيحة."); return
+        nom, prix = self.produit_selectionne
+        self.panier.append({'nom': nom, 'qte': int(qte_str), 'prix': prix})
+        self.mettre_a_jour_panier_visuel()
+        self.entry_calc.delete(0, tk.END); self.produit_selectionne = None; self.nouvelle_saisie_calc = True
+        self.label_produit_selectionne.config(text="الرجاء اختيار منتج", font=("Cairo", 16, "italic"), fg="#7f8c8d")
+
+    def charger_categories(self):
+        for widget in self.categorie_frame.winfo_children(): widget.destroy()
+        query = "SELECT DISTINCT c.nom FROM categories c JOIN produits p ON c.id = p.categorie_id WHERE p.type = 'vente' ORDER BY c.nom"
+        self.liste_categories = [row[0] for row in execute_query(query, fetch='all')]
+        cat_btn_config = {'font': ("Cairo", 14, "bold"), 'relief': 'raised', 'bd': 1, 'bg': '#bdc3c7', 'activebackground': '#3498db', 'pady': 10}
+        for cat in self.liste_categories:
+            btn = tk.Button(self.categorie_frame, text=cat, **cat_btn_config, command=lambda c=cat: self.charger_produits_par_categorie(c))
+            btn.pack(side="right", fill="x", expand=True, padx=2)
+
+    def charger_produits_par_categorie(self, categorie):
+        for widget in self.produit_frame.winfo_children(): widget.destroy()
+        self.images_produits.clear()
+        query = "SELECT p.nom, p.prix, p.photo_path FROM produits p JOIN categories c ON p.categorie_id = c.id WHERE c.nom = ? AND p.type = 'vente' ORDER BY p.nom"
+        produits = execute_query(query, (categorie,), fetch='all') or []
+        row, col = 0, 0
+        for nom, prix, photo_path in produits:
+            prix_int = int(prix)
+            card = tk.Frame(self.produit_frame, bg="#ecf0f1", bd=1, relief="solid")
+            card.grid(row=row, column=col, padx=10, pady=10)
+            photo_image = None
+            if photo_path and os.path.exists(photo_path):
+                try:
+                    img = Image.open(photo_path); img = ImageOps.exif_transpose(img); img.thumbnail((140, 120))
+                    photo_image = ImageTk.PhotoImage(img)
+                    self.images_produits.append(photo_image)
+                except Exception: photo_image = None
+            img_button = tk.Button(card, image=photo_image, bg="white", relief="flat", command=lambda n=nom, p=prix_int: self.selectionner_produit(n, p))
+            img_button.pack(padx=5, pady=5)
+            label_text = f"{nom}\n{prix_int} د.ج"
+            tk.Label(card, text=label_text, font=("Cairo", 14, "bold"), bg="#ecf0f1").pack(pady=(0, 5))
+            col += 1
+            if col == 5: col = 0; row += 1
+
+    def selectionner_produit(self, nom, prix):
+        self.produit_selectionne = (nom, prix)
+        self.label_produit_selectionne.config(text=f"{nom} - {prix} د.ج", font=("Cairo", 18, "bold"), fg="#3498db")
+        self.entry_calc.focus_set(); self.entry_calc.delete(0, tk.END); self.entry_calc.insert(0, "1")
+        self.nouvelle_saisie_calc = True
+
+    def mettre_a_jour_panier_visuel(self):
+        for i in self.panier_tree.get_children(): self.panier_tree.delete(i)
+        total = 0
+        for item in self.panier:
+            total_ligne = item['prix'] * item['qte']
+            self.panier_tree.insert("", "end", values=(f"{total_ligne}", f"{item['prix']}", f"{item['qte']}", item['nom']))
+            total += total_ligne
+        self.total_var.set(f"{total} د.ج")
+
+    def supprimer_article_panier(self):
+        selected_item = self.panier_tree.selection()
+        if not selected_item: messagebox.showwarning("تنبيه", "الرجاء اختيار منتج من السلة لحذفه."); return
+        index = self.panier_tree.index(selected_item[0])
+        del self.panier[index]
+        self.mettre_a_jour_panier_visuel()
+
+    def valider_vente(self):
+        if not self.panier: messagebox.showinfo("معلومة", "السلة فارغة."); return
+        id_vendeur_actif = self.main_controller.user_id
+        if id_vendeur_actif is None: messagebox.showerror("Erreur Critique", "Aucun utilisateur n'est connecté. Impossible d'enregistrer la vente."); return
+        total_vente = sum(item['prix'] * item['qte'] for item in self.panier)
+        
+        vente_id = execute_query("INSERT INTO ventes (total, date_vente, vendeur_id) VALUES (?, datetime('now', 'localtime'), ?)", (total_vente, id_vendeur_actif))
+        if vente_id:
+            for item in self.panier:
+                produit_info = execute_query("SELECT id, stock, gere_en_stock FROM produits WHERE nom=?", (item['nom'],), fetch='one')
+                if produit_info:
+                    produit_id, stock_actuel, gere_en_stock = produit_info
+                    execute_query("INSERT INTO details_vente (vente_id, produit_id, quantite, prix_unitaire) VALUES (?, ?, ?, ?)", (vente_id, produit_id, item['qte'], item['prix']))
+                    if gere_en_stock == 1:
+                        execute_query("UPDATE produits SET stock = ? WHERE id = ?", (stock_actuel - item['qte'], produit_id))
+            messagebox.showinfo("نجاح", "✅ تم تسجيل البيع بنجاح!")
+            self.panier.clear(); self.mettre_a_jour_panier_visuel()
+            self.label_produit_selectionne.config(text="الرجاء اختيار منتج", font=("Cairo", 16, "italic"), fg="#7f8c8d")
+
+    def annuler_vente(self):
+        if self.panier and CustomMessageBox(self, "تأكيد الإلغاء", "هل تريد إلغاء البيع الحالي؟").show():
+            self.panier.clear()
+            self.mettre_a_jour_panier_visuel()
+            self.label_produit_selectionne.config(text="الرجاء اختيار منتج", font=("Cairo", 16, "italic"), fg="#7f8c8d")
