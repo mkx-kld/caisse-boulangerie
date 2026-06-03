@@ -31,7 +31,7 @@ class TransformationStockWindow(DynamicToplevel):
         self.main_controller = self.parent.main_controller
 
         # Charger uniquement les produits marqués comme "produit de stock"
-        stock_prods = execute_query("SELECT id, nom FROM produits WHERE is_stock_product = 1 ORDER BY nom", fetch='all') or []
+        stock_prods = execute_query("SELECT id, nom FROM produits WHERE gere_en_stock = 1 ORDER BY nom", fetch='all') or []
         self.stock_products_map = {name: prod_id for prod_id, name in stock_prods}
         product_names = list(self.stock_products_map.keys())
 
@@ -452,7 +452,7 @@ class EmployeDetailsWindow(DynamicToplevel):
         self.center_window()
 
     def creer_widgets(self):
-        main_frame = tk.Frame(self, bg="#f0f2f5"); main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        main_frame = tk.Frame(self, bg="#eaf0f6"); main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         main_frame.columnconfigure(0, weight=1); main_frame.rowconfigure(1, weight=1)
         info_frame = tk.LabelFrame(main_frame, text=" معلومات شخصية ", font=("Cairo", 16, "bold"), bg="white", fg="#34495e", bd=2, relief="groove")
         info_frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
@@ -777,71 +777,6 @@ class EnregistrerPaiementWindow(DynamicToplevel):
             self.on_success_callback()
         self.destroy()
 
-# Fichier: ui/components/app_dialogs.py
-# Remplacez votre classe EnregistrerPaiementWindow par celle-ci
-
-class EnregistrerPaiementWindow(DynamicToplevel):
-    def __init__(self, parent, main_controller, partenaire, on_success=None):
-        
-        super().__init__(parent, title=get_text("register_payment_for").format(nom=partenaire['nom']))
-        self.parent = parent
-        self.controller = main_controller
-        self.partenaire = partenaire
-        # MODIFIÉ : On sauvegarde le signal pour l'utiliser plus tard
-        self.on_success_callback = on_success 
-        
-        main_frame = tk.Frame(self, bg="#eaf0f6", padx=30, pady=20)
-        main_frame.pack(fill="both", expand=True)
-        
-        tk.Label(main_frame, text=f"{get_text('register_payment_for').format(nom=partenaire['nom'])}", font=("Cairo", 20, "bold"), bg="#eaf0f6").pack(pady=10)
-        tk.Label(main_frame, text=f"{get_text('current_balance')}: {partenaire['solde_credit']:.2f} د.ج", font=("Cairo", 14), bg="#eaf0f6").pack(pady=5)
-        
-        tk.Label(main_frame, text=get_text("amount_paid"), font=("Cairo", 14), bg="#eaf0f6").pack(pady=(10,0))
-        self.montant_var = tk.StringVar()
-        montant_entry = tk.Entry(main_frame, textvariable=self.montant_var, font=("Cairo", 14), justify="center", width=20, relief="solid", bd=1)
-        montant_entry.pack(pady=5)
-        
-        tk.Button(main_frame, text=get_text("confirm_payment_button"), font=("Cairo", 14, "bold"), bg="#27ae60", fg="white", command=self.valider_paiement).pack(pady=20, fill="x", ipady=5)
-        self.center_window()
-
-    def valider_paiement(self):
-        user_id = self.controller.user_id
-        try:
-            montant_paiement = float(self.montant_var.get())
-            if montant_paiement <= 0: raise ValueError
-        except (ValueError, TypeError):
-            messagebox.showerror(get_text("error"), get_text("invalid_amount_warning"), parent=self)
-            return
-
-        partenaire_type = execute_query("SELECT type_partenaire FROM partenaires WHERE id=?", (self.partenaire['id'],), fetch='one')[0]
-
-        montant_a_enregistrer = 0
-        trans_type = ""
-        if partenaire_type == 'client_pro':
-            execute_query("UPDATE partenaires SET solde_credit = solde_credit - ? WHERE id = ?", (montant_paiement, self.partenaire['id']))
-            montant_a_enregistrer = montant_paiement
-            trans_type = get_text("payment_from_client")
-        else: # fournisseur
-            execute_query("UPDATE partenaires SET solde_credit = solde_credit + ? WHERE id = ?", (montant_paiement, self.partenaire['id']))
-            montant_a_enregistrer = -abs(montant_paiement)
-            trans_type = get_text("payment_to_supplier")
-        
-        trans_desc = f"{trans_type}: {self.partenaire['nom']}"
-        
-        execute_query(
-            "INSERT INTO transactions (description, montant, date, type_transaction, vendeur_id, partenaire_id) VALUES (?, ?, datetime('now', 'localtime'), ?, ?, ?)",
-            (trans_desc, montant_a_enregistrer, trans_type, user_id, self.partenaire['id'])
-        )
-
-        messagebox.showinfo(get_text("success"), get_text("payment_success_message"), parent=self)
-        
-        # MODIFIÉ : On active le signal de rafraîchissement avant de fermer
-        if self.on_success_callback:
-            self.on_success_callback()
-
-        self.destroy()
-
-
 class NotificationsWindow(DynamicToplevel):
     """Fenêtre affichant les notifications importantes (certificats, etc.)."""
     def __init__(self, parent, notifications):
@@ -899,7 +834,7 @@ class GererTarifsPartenaireWindow(DynamicToplevel):
         main_frame.pack(expand=True, fill="both")
 
         title_text = f"{get_text('special_prices_for')} : {partenaire_nom}"
-        tk.Label(main_frame, text=title_text, font=("Cairo", 20, "bold"), bg="#f0f2f6", fg="#2c3e50").pack(pady=15)
+        tk.Label(main_frame, text=title_text, font=("Cairo", 20, "bold"), bg="#eaf0f6", fg="#2c3e50").pack(pady=15)
 
         canvas_frame = tk.Frame(main_frame)
         canvas_frame.pack(expand=True, fill="both", padx=10)
@@ -970,7 +905,7 @@ class GererTarifsPartenaireWindow(DynamicToplevel):
                 prix_special = float(prix_special_str)
                 execute_query("INSERT OR REPLACE INTO partenaire_prix (partenaire_id, produit_id, prix_special) VALUES (?, ?, ?)", (self.partenaire_id, produit_id, prix_special))
             except ValueError:
-                messagebox.showwarning(get_text("invalid_price_warning"), parent=self)
+                messagebox.showwarning(get_text("warning"), get_text("invalid_price_warning"), parent=self)
         messagebox.showinfo(get_text("success"), get_text("save_prices_success"), parent=self)
         self.destroy()
 

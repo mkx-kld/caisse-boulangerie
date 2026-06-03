@@ -11,7 +11,7 @@ from utils import format_currency
 
 class ActivitesPanel(tk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent, bg="#f0f2f5")
+        super().__init__(parent, bg="#eaf0f6")
         self.controller = controller
         self.main_controller = self.controller.controller
 
@@ -23,7 +23,7 @@ class ActivitesPanel(tk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
 
-        tk.Label(self, text=get_text("activity_page_title"), font=("Cairo", 32, "bold"), bg="#f0f2f5", fg="#2c3e50").grid(row=0, column=0, pady=20)
+        tk.Label(self, text=get_text("activity_page_title"), font=("Cairo", 32, "bold"), bg="#eaf0f6", fg="#2c3e50").grid(row=0, column=0, pady=20)
         self.creer_filtres()
         self.creer_rapport_et_totaux()
         

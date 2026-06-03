@@ -11,7 +11,7 @@ from ui.components.app_dialogs import TransformationStockWindow
 
 class StockPanel(tk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent, bg="#f0f2f5")
+        super().__init__(parent, bg="#eaf0f6")
         self.controller = controller
         self.main_controller = controller.controller if hasattr(controller, 'controller') else controller
         self.selected_produit = None
@@ -60,7 +60,7 @@ class StockPanel(tk.Frame):
         self.btn_valider.grid(row=0, column=0, rowspan=2, padx=(15, 20), pady=5)
 
     def creer_panneau_liste_et_historique(self):
-        main_liste_frame = tk.Frame(self, bg="#f0f2f5")
+        main_liste_frame = tk.Frame(self, bg="#eaf0f6")
         main_liste_frame.grid(row=1, column=0, rowspan=2, padx=25, pady=10, sticky="nsew")
         main_liste_frame.columnconfigure(0, weight=1)
         main_liste_frame.columnconfigure(1, weight=1)

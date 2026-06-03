@@ -9,14 +9,12 @@ from database.db_manager import execute_query
 from utils import format_currency
 from ..components.input_popups import CalculatorPopup, KeyboardPopup
 
-# --- MODIFICATION ---
-# Les imports pointent maintenant vers le nouveau fichier de dialogs
-from ..dialogs.credit_dialogs import RecordPaymentDialog 
-# Note: VenteCreditWindow et GererTarifsPartenaireWindow seront déplacés plus tard
+from ..dialogs.credit_dialogs import RecordPaymentDialog
+from ..components.app_dialogs import VenteCreditWindow, GererTarifsPartenaireWindow
 
 class PartenairesPanel(tk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent, bg="#f0f2f5")
+        super().__init__(parent, bg="#eaf0f6")
         self.controller = controller
         self.main_controller = controller.controller if hasattr(controller, 'controller') else controller
         
@@ -90,7 +88,7 @@ class PartenairesPanel(tk.Frame):
         self.history_tree.tag_configure('creance', foreground='green', font=("Cairo", 14, "bold"))
 
     def creer_panneau_droit_liste(self):
-        right_frame = tk.LabelFrame(self, text=" Gestion des Partenaires ", font=("Cairo", 18, "bold"), bg="white", fg="#34495e", bd=2, relief="groove", padx=10, pady=10)
+        right_frame = tk.LabelFrame(self, text=f" {get_text('partners_panel_title')} ", font=("Cairo", 18, "bold"), bg="white", fg="#34495e", bd=2, relief="groove", padx=10, pady=10)
         right_frame.grid(row=0, column=1, padx=(10,25), pady=20, sticky="nsew")
         right_frame.rowconfigure(1, weight=1); right_frame.columnconfigure(0, weight=1)
         self.creer_formulaire(right_frame)
@@ -203,12 +201,25 @@ class PartenairesPanel(tk.Frame):
         self.btn_operation.config(text=sale_purchase_text)
 
     def open_price_manager(self):
-        # Cette fonction devra être mise à jour pour importer GererTarifsPartenaireWindow depuis son nouvel emplacement.
-        pass
+        if not self.selected_partenaire_data: return
+        GererTarifsPartenaireWindow(
+            self,
+            partenaire_id=self.selected_partenaire_data[0],
+            partenaire_nom=self.selected_partenaire_data[1],
+            partenaire_type=self.selected_partenaire_data[3]
+        )
 
     def open_credit_sale(self):
-        # Cette fonction devra être mise à jour pour importer VenteCreditWindow depuis son nouvel emplacement.
-        pass
+        if not self.selected_partenaire_data: return
+        partenaire = {
+            'id': self.selected_partenaire_data[0],
+            'nom': self.selected_partenaire_data[1],
+            'type': self.selected_partenaire_data[3]
+        }
+        def on_success():
+            self.charger_partenaires()
+            self.on_partner_select()
+        VenteCreditWindow(self, partenaire, on_success=on_success)
     
     def open_payment_window(self):
         if not self.selected_partenaire_data: return

@@ -16,7 +16,7 @@ from translations import get_text
 
 class EmployesPanel(tk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent, bg="#f0f2f5")
+        super().__init__(parent, bg="#eaf0f6")
         self.controller = controller
         self.photo_path = None
         
